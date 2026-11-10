@@ -12,10 +12,8 @@ import logging
 from pathlib import Path
 from typing import override
 
-import fsspec
 import numpy as np
 import xarray as xr
-import zarr
 
 from weathergen.datasets.data_reader_anemoi import _clip_lat, _clip_lon
 from weathergen.datasets.data_reader_base import (
@@ -52,20 +50,22 @@ class DataReaderIconEsm(DataReaderTimestep):
         if not ref_path.exists():
             raise FileNotFoundError(f"Kerchunk reference JSON not found: {ref_path}")
 
-        # Load JSON references and initialize a virtual file system
+        # Let Zarr 3 construct the reference filesystem in its async context.
+        # A pre-built synchronous FSMap cannot be reopened by Zarr's async backend.
         kerchunk_ref = json.loads(ref_path.read_text())
-        # Newer fsspec skips generated references in simple template mode.
-        # Enable sandboxed Jinja rendering only for manifests containing `gen`.
-        fs = fsspec.filesystem(
-            "reference", fo=kerchunk_ref, simple_templates=not bool(kerchunk_ref.get("gen"))
+        storage_options = {
+            "fo": kerchunk_ref,
+            "simple_templates": not bool(kerchunk_ref.get("gen")),
+            "asynchronous": True,
+            "remote_options": {"asynchronous": True},
+        }
+        self.ds = xr.open_dataset(
+            "reference://",
+            engine="zarr",
+            backend_kwargs={"storage_options": storage_options},
+            consolidated=False,
+            chunks={"time": 1},
         )
-        mapper = fs.get_mapper("")
-
-        # Ensure metadata is consolidated for zarr-style access
-        zarr.consolidate_metadata(mapper)
-
-        # Open the dataset using Xarray with Zarr engine
-        self.ds = xr.open_dataset(mapper, engine="zarr", consolidated=True, chunks={"time": 1})
 
         # get pressure levels
         self.plev = stream_info["plev"]
